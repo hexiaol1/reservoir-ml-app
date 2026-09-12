@@ -6,7 +6,7 @@ import seaborn as sns
 import io
 import chardet
 
-from sklearn.model_selection import train_test_split, learning_curve
+from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.neighbors import NearestNeighbors
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
@@ -16,22 +16,22 @@ from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
 
 # 1. 基础页面设置
 st.set_page_config(
-    page_title="储层参数机器学习平台",
+    page_title="储层物性机器学习双文件盲井预测平台",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# 字体配置（不依赖外部包，自动探测系统可用中文字体）
 plt.rcParams['font.sans-serif'] = ['DejaVu Sans', 'SimHei', 'Microsoft YaHei', 'PingFang SC', 'sans-serif']
 plt.rcParams['axes.unicode_minus'] = False
 sns.set_theme(style="whitegrid")
 
-# 2. 文件读取
-def load_txt_file(uploaded_file):
+# 2. 稳健编码解析器
+def load_file(uploaded_file):
+    if uploaded_file is None:
+        return None
     raw_bytes = uploaded_file.getvalue()
     enc_detect = chardet.detect(raw_bytes[:10000])
     encoding = enc_detect.get('encoding', 'utf-8') or 'gb18030'
-    
     for enc in [encoding, 'utf-8', 'gb18030', 'gbk', 'utf-8-sig']:
         try:
             df = pd.read_csv(io.BytesIO(raw_bytes), encoding=enc, sep=r'\s+|,|\t', engine='python')
@@ -42,39 +42,55 @@ def load_txt_file(uploaded_file):
             continue
     return None
 
-def generate_synthetic_data(n_samples=200):
+# 3. 示例数据生成器（训练集 + 独立盲井）
+def generate_demo_datasets():
     np.random.seed(42)
-    depth = np.linspace(2100, 2400, n_samples)
-    gr = np.clip(45 + 50 * np.sin(depth / 40) + np.random.normal(0, 6, n_samples), 20, 180)
-    rhob = np.clip(2.68 - 0.003 * gr + np.random.normal(0, 0.03, n_samples), 2.15, 2.8)
-    dt = np.clip(185 + (2.7 - rhob) * 110 + np.random.normal(0, 5, n_samples), 170, 310)
-    nphi = np.clip(0.04 + 0.0016 * gr + np.random.normal(0, 0.015, n_samples), 0.02, 0.42)
-    rt = 10 ** (np.random.uniform(0.6, 2.2, n_samples) + 0.008 * gr / 10)
+    # 训练集：2口开发井模拟
+    depth_tr = np.linspace(2100, 2450, 240)
+    gr_tr = np.clip(45 + 55 * np.sin(depth_tr / 35) + np.random.normal(0, 7, 240), 20, 180)
+    rhob_tr = np.clip(2.68 - 0.003 * gr_tr + np.random.normal(0, 0.03, 240), 2.15, 2.8)
+    dt_tr = np.clip(185 + (2.7 - rhob_tr) * 110 + np.random.normal(0, 5, 240), 170, 310)
+    nphi_tr = np.clip(0.04 + 0.0016 * gr_tr + np.random.normal(0, 0.015, 240), 0.02, 0.42)
+    rt_tr = 10 ** (np.random.uniform(0.6, 2.2, 240) + 0.008 * gr_tr / 10)
     
-    toc = np.clip(0.028 * gr + 0.009 * dt - 1.15 * rhob + np.random.normal(0, 0.25, n_samples), 0.2, 8.0)
-    por = np.clip(((2.65 - rhob) / 1.65) * 65 + nphi * 28 + np.random.normal(0, 0.7, n_samples), 1.5, 28.0)
-    perm = np.clip((10 ** (0.17 * por - 1.4)) * np.exp(np.random.normal(0, 0.35, n_samples)), 0.01, 2000.0)
-    
-    return pd.DataFrame({
-        '井深(m)': depth,
-        '自然伽马_GR(API)': gr,
-        '声波时差_DT(us/ft)': dt,
-        '补偿密度_RHOB(g/cm3)': rhob,
-        '补偿中子_NPHI(v/v)': nphi,
-        '深侧向电阻率_RT(ohm.m)': rt,
-        '总有机碳_TOC(%)': toc,
-        '孔隙度_POR(%)': por,
-        '渗透率_PERM(mD)': perm
+    toc_tr = np.clip(0.028 * gr_tr + 0.009 * dt_tr - 1.15 * rhob_tr + np.random.normal(0, 0.25, 240), 0.2, 8.0)
+    por_tr = np.clip(((2.65 - rhob_tr) / 1.65) * 65 + nphi_tr * 28 + np.random.normal(0, 0.7, 240), 1.5, 28.0)
+    perm_tr = np.clip((10 ** (0.17 * por_tr - 1.4)) * np.exp(np.random.normal(0, 0.35, 240)), 0.01, 2000.0)
+
+    df_train = pd.DataFrame({
+        '井深(m)': depth_tr, '自然伽马_GR': gr_tr, '声波时差_DT': dt_tr,
+        '补偿密度_RHOB': rhob_tr, '补偿中子_NPHI': nphi_tr, '深侧向电阻率_RT': rt_tr,
+        '总有机碳_TOC(%)': toc_tr, '孔隙度_POR(%)': por_tr, '渗透率_PERM(mD)': perm_tr
     })
 
-# 3. 数据增强引擎 (单线程纯 numpy 运算，杜绝容器死锁)
+    # 独立盲井：1口勘探盲井（带一定地层非均质扰动）
+    np.random.seed(1024)
+    depth_blind = np.linspace(2500, 2680, 150)
+    gr_b = np.clip(50 + 60 * np.cos(depth_blind / 30) + np.random.normal(0, 8, 150), 20, 185)
+    rhob_b = np.clip(2.67 - 0.003 * gr_b + np.random.normal(0, 0.035, 150), 2.15, 2.8)
+    dt_b = np.clip(182 + (2.7 - rhob_b) * 115 + np.random.normal(0, 6, 150), 170, 310)
+    nphi_b = np.clip(0.045 + 0.0015 * gr_b + np.random.normal(0, 0.02, 150), 0.02, 0.45)
+    rt_b = 10 ** (np.random.uniform(0.5, 2.3, 150) + 0.008 * gr_b / 10)
+
+    toc_b = np.clip(0.028 * gr_b + 0.009 * dt_b - 1.15 * rhob_b + np.random.normal(0, 0.28, 150), 0.2, 8.0)
+    por_b = np.clip(((2.65 - rhob_b) / 1.65) * 65 + nphi_b * 28 + np.random.normal(0, 0.75, 150), 1.5, 28.0)
+    perm_b = np.clip((10 ** (0.17 * por_b - 1.4)) * np.exp(np.random.normal(0, 0.38, 150)), 0.01, 2000.0)
+
+    df_blind = pd.DataFrame({
+        '井深(m)': depth_blind, '自然伽马_GR': gr_b, '声波时差_DT': dt_b,
+        '补偿密度_RHOB': rhob_b, '补偿中子_NPHI': nphi_b, '深侧向电阻率_RT': rt_b,
+        '总有机碳_TOC(%)': toc_b, '孔隙度_POR(%)': por_b, '渗透率_PERM(mD)': perm_b
+    })
+    return df_train, df_blind
+
+# 4. 数据增强引擎 (仅对训练集作用，单线程防死锁)
 def augment_dataset(X_tr, y_tr, method="KNN流形邻域插值", factor=2, noise_level=0.03):
     X_tr = np.ascontiguousarray(X_tr, dtype=np.float64)
     y_tr = np.ascontiguousarray(y_tr, dtype=np.float64)
     n_samples, n_features = X_tr.shape
     n_synthetic = int(n_samples * factor)
     np.random.seed(42)
-    
+
     if factor <= 0 or n_synthetic == 0:
         return X_tr, y_tr, np.zeros(n_samples, dtype=bool)
 
@@ -106,211 +122,286 @@ def augment_dataset(X_tr, y_tr, method="KNN流形邻域插值", factor=2, noise_
 
     return np.vstack([X_tr, synth_X]), np.concatenate([y_tr, synth_y]), np.concatenate([np.zeros(n_samples, dtype=bool), np.ones(n_synthetic, dtype=bool)])
 
-# 4. 侧边栏与数据流
-st.sidebar.title("🛢️ 储层参数预测工作台")
-data_mode = st.sidebar.radio("数据来源", ["上传本地 TXT/CSV 文件", "使用示例测井数据"])
+# -------------------------------------------------------------
+# 5. 侧边栏双文件上传与参数绑定
+# -------------------------------------------------------------
+st.sidebar.title("🛢️ 储层物性盲井跨井验证工作台")
 
-raw_df = None
-if data_mode == "上传本地 TXT/CSV 文件":
-    up_file = st.sidebar.file_uploader("上传测井数据 TXT/CSV", type=["txt", "csv"])
-    if up_file is not None:
-        raw_df = load_txt_file(up_file)
-        if raw_df is None:
-            st.sidebar.error("文件解码失败，自动切换为示例数据。")
-            raw_df = generate_synthetic_data()
-        else:
-            st.sidebar.success(f"载入成功：{raw_df.shape[0]} 行 × {raw_df.shape[1]} 列")
+data_mode = st.sidebar.radio("数据模式", ["上传本地训练集与盲井文件", "使用系统示例基准双文件"])
+
+if data_mode == "上传本地训练集与盲井文件":
+    st.sidebar.markdown("#### 📂 上传文件")
+    train_file = st.sidebar.file_uploader("1. 上传训练集数据 (TXT/CSV)", type=["txt", "csv"], key="train_file")
+    blind_file = st.sidebar.file_uploader("2. 上传独立盲井数据 (TXT/CSV)", type=["txt", "csv"], key="blind_file")
+    
+    df_train_raw = load_file(train_file)
+    df_blind_raw = load_file(blind_file)
+
+    if df_train_raw is None or df_blind_raw is None:
+        st.sidebar.info("请上传两个完整文件。未上传前已自动载入演示基准数据。")
+        df_train_raw, df_blind_raw = generate_demo_datasets()
     else:
-        raw_df = generate_synthetic_data()
+        st.sidebar.success(f"训练集: {df_train_raw.shape[0]}行 | 盲井: {df_blind_raw.shape[0]}行")
 else:
-    raw_df = generate_synthetic_data()
+    df_train_raw, df_blind_raw = generate_demo_datasets()
 
-# 拷贝数据，避免原地篡改
-df = raw_df.copy()
-all_cols = df.columns.tolist()
+# 拷贝数据防止缓存篡改
+df_tr = df_train_raw.copy()
+df_bl = df_blind_raw.copy()
 
-st.sidebar.subheader("🎯 1. 变量选择")
-depth_guess = next((c for c in all_cols if any(k in str(c).lower() for k in ['depth', '深', '井深'])), all_cols[0])
-depth_col = st.sidebar.selectbox("井深列", all_cols, index=all_cols.index(depth_guess))
+# 共同列分析与纯数值过滤
+common_cols = [c for c in df_tr.columns if c in df_bl.columns]
 
-# 自动筛选数值列，剔除井名等非数值列
-numeric_cols = []
-for c in all_cols:
+st.sidebar.markdown("---")
+st.sidebar.subheader("🎯 1. 变量与特征映射")
+
+# 井深列
+depth_guess = next((c for c in common_cols if any(k in str(c).lower() for k in ['depth', '深', '井深'])), common_cols[0])
+depth_col = st.sidebar.selectbox("井深列 (用于单井剖面绘图)", common_cols, index=common_cols.index(depth_guess))
+
+# 自动筛选数值列（剔除井名等字符串）
+numeric_features = []
+for c in common_cols:
     if c == depth_col:
         continue
-    series = pd.to_numeric(df[c], errors='coerce')
-    if series.notna().sum() > len(df) * 0.5:
-        numeric_cols.append(c)
-        df[c] = series
+    s_tr = pd.to_numeric(df_tr[c], errors='coerce')
+    s_bl = pd.to_numeric(df_bl[c], errors='coerce')
+    if s_tr.notna().sum() > len(df_tr) * 0.5 and s_bl.notna().sum() > len(df_bl) * 0.5:
+        numeric_features.append(c)
+        df_tr[c] = s_tr
+        df_bl[c] = s_bl
 
-if not numeric_cols:
-    st.error("文件中未找到有效的数值测井曲线！")
+if not numeric_features:
+    st.error("两个文件中未检测到共同的数值型测井特征！")
     st.stop()
 
-target_col = st.sidebar.selectbox("预测目标列 (Target)", numeric_cols, index=len(numeric_cols)-1)
-feature_candidates = [c for c in numeric_cols if c != target_col]
-feature_cols = st.sidebar.multiselect("输入特征列 (Features)", feature_candidates, default=feature_candidates)
+# 目标列选择
+target_col = st.sidebar.selectbox("预测物性目标列 (Target)", numeric_features, index=len(numeric_features)-1)
+
+# 输入特征列选择
+feat_candidates = [c for c in numeric_features if c != target_col]
+feature_cols = st.sidebar.multiselect("模型输入测井特征 (Features)", feat_candidates, default=feat_candidates)
 
 if not feature_cols:
-    st.warning("请在左侧至少勾选一个特征列！")
+    st.warning("请至少选择一个输入特征！")
     st.stop()
 
-# 清洗脏数据
-clean_mask = df[feature_cols + [target_col, depth_col]].notna().all(axis=1)
-df_clean = df[clean_mask].copy()
+# 检查盲井是否含有实测真实标签
+blind_has_ground_truth = df_bl[target_col].notna().sum() > (len(df_bl) * 0.3)
 
-if len(df_clean) < 10:
-    st.error("有效数值样本过少（不足 10 行），无法建模！")
-    st.stop()
+# 数据清洗
+df_tr_clean = df_tr[feature_cols + [target_col, depth_col]].dropna().copy()
+df_bl_clean = df_bl[feature_cols + ([target_col] if blind_has_ground_truth else []) + [depth_col]].dropna().copy()
 
-enable_log_target = st.sidebar.checkbox("启用目标变量 log10 对数变换", value=('perm' in target_col.lower() or '渗透' in target_col))
+enable_log_target = st.sidebar.checkbox("启用目标变量 log10 对数变换 (渗透率建议勾选)", value=('perm' in target_col.lower() or '渗透' in target_col))
 
-# 模型选择
-st.sidebar.subheader("🧠 2. 回归模型选择")
+st.sidebar.markdown("---")
+# 算法选择
+st.sidebar.subheader("🧠 2. 算法选择")
 selected_model_name = st.sidebar.selectbox(
-    "选择拟合回归模型",
-    ["随机森林回归 (Random Forest)", "支持向量回归 (SVR)", "BP 神经网络回归 (MLP)", "梯度提升树 (Gradient Boosting)"]
+    "拟合回归算法",
+    ["随机森林回归 (Random Forest)", "支持向量回归 (SVR)", "BP 神经网络回归 (MLP)", "梯度提升回归树 (Gradient Boosting)"]
 )
 
-# 数据增强设置
-st.sidebar.subheader("⚡ 3. 增强与划分")
-enable_aug = st.sidebar.checkbox("开启训练集数据增强", value=True)
-aug_method = st.sidebar.selectbox("增强策略", ["KNN流形邻域插值", "连续 Mixup 线性插值", "高斯扰动抖动 (Jittering)"]) if enable_aug else "关闭"
-aug_factor = st.sidebar.slider("增强倍数", 1, 5, 2) if enable_aug else 0
+# 增强与验证集划分
+st.sidebar.subheader("⚡ 3. 训练集增强设置")
+enable_aug = st.sidebar.checkbox("对训练集开启数据增强", value=True)
+aug_method = st.sidebar.selectbox("增强算法", ["KNN流形邻域插值", "连续 Mixup 线性插值", "高斯扰动抖动 (Jittering)"]) if enable_aug else "关闭"
+aug_factor = st.sidebar.slider("增强倍数 (生成 N 倍合成样本)", 1, 5, 2) if enable_aug else 0
+val_ratio = st.sidebar.slider("训练集内部切分验证集比例 (Val)", 0.1, 0.3, 0.2, step=0.05)
 
-test_ratio = st.sidebar.slider("独立测试集比例", 0.1, 0.3, 0.15, step=0.05)
-val_ratio = st.sidebar.slider("验证集比例", 0.1, 0.3, 0.2, step=0.05)
+# -------------------------------------------------------------
+# 6. 计算矩阵提取与模型训练
+# -------------------------------------------------------------
+X_tr_raw = df_tr_clean[feature_cols].to_numpy(dtype=np.float64)
+y_tr_raw = df_tr_clean[target_col].to_numpy(dtype=np.float64)
 
-# 5. 核心计算
-X_raw = df_clean[feature_cols].to_numpy(dtype=np.float64)
-y_raw = df_clean[target_col].to_numpy(dtype=np.float64)
-depth_vals = df_clean[depth_col].to_numpy(dtype=np.float64)
+X_bl_raw = df_bl_clean[feature_cols].to_numpy(dtype=np.float64)
+depth_bl = df_bl_clean[depth_col].to_numpy(dtype=np.float64)
 
 if enable_log_target:
-    y_raw = np.log10(np.clip(y_raw, 1e-4, None))
+    y_tr_raw = np.log10(np.clip(y_tr_raw, 1e-4, None))
 
-X_temp, X_test, y_temp, y_test = train_test_split(X_raw, y_raw, test_size=test_ratio, random_state=42)
-X_train_orig, X_val, y_train_orig, y_val = train_test_split(X_temp, y_temp, test_size=val_ratio, random_state=42)
+# 仅从训练集中切分验证集
+X_train_orig, X_val, y_train_orig, y_val = train_test_split(X_tr_raw, y_tr_raw, test_size=val_ratio, random_state=42)
 
+# 对训练集执行数据增强（盲井和验证集完全不参与增强，保证绝对干净）
 if enable_aug:
     X_train, y_train, is_synth = augment_dataset(X_train_orig, y_train_orig, method=aug_method, factor=aug_factor)
 else:
     X_train, y_train, is_synth = X_train_orig, y_train_orig, np.zeros(len(X_train_orig), dtype=bool)
 
+# 特征标准化（使用训练集参数，Transform 验证集与盲井）
 scaler = StandardScaler()
 X_train_s = scaler.fit_transform(X_train)
 X_val_s = scaler.transform(X_val)
-X_test_s = scaler.transform(X_test)
-X_all_s = scaler.transform(X_raw)
+X_bl_s = scaler.transform(X_bl_raw)
 
-# 实例化模型（必须固定 n_jobs=1，防止云端多进程锁死）
+# 拟合模型
 if "随机森林" in selected_model_name:
-    model = RandomForestRegressor(n_estimators=100, max_depth=10, random_state=42, n_jobs=1)
+    model = RandomForestRegressor(n_estimators=120, max_depth=12, random_state=42, n_jobs=1)
     model.fit(X_train, y_train)
-    y_tr_pred, y_va_pred, y_te_pred, y_al_pred = model.predict(X_train), model.predict(X_val), model.predict(X_test), model.predict(X_raw)
+    y_tr_pred = model.predict(X_train)
+    y_va_pred = model.predict(X_val)
+    y_bl_pred = model.predict(X_bl_raw)
 elif "支持向量" in selected_model_name:
-    model = SVR(C=10.0, epsilon=0.1)
+    model = SVR(C=12.0, epsilon=0.08)
     model.fit(X_train_s, y_train)
-    y_tr_pred, y_va_pred, y_te_pred, y_al_pred = model.predict(X_train_s), model.predict(X_val_s), model.predict(X_test_s), model.predict(X_all_s)
+    y_tr_pred = model.predict(X_train_s)
+    y_va_pred = model.predict(X_val_s)
+    y_bl_pred = model.predict(X_bl_s)
 elif "BP" in selected_model_name:
-    model = MLPRegressor(hidden_layer_sizes=(64, 32), max_iter=400, random_state=42, early_stopping=True)
+    model = MLPRegressor(hidden_layer_sizes=(64, 32), max_iter=450, random_state=42, early_stopping=True)
     model.fit(X_train_s, y_train)
-    y_tr_pred, y_va_pred, y_te_pred, y_al_pred = model.predict(X_train_s), model.predict(X_val_s), model.predict(X_test_s), model.predict(X_all_s)
+    y_tr_pred = model.predict(X_train_s)
+    y_va_pred = model.predict(X_val_s)
+    y_bl_pred = model.predict(X_bl_s)
 else:
     model = GradientBoostingRegressor(n_estimators=100, max_depth=4, random_state=42)
     model.fit(X_train, y_train)
-    y_tr_pred, y_va_pred, y_te_pred, y_al_pred = model.predict(X_train), model.predict(X_val), model.predict(X_test), model.predict(X_raw)
+    y_tr_pred = model.predict(X_train)
+    y_va_pred = model.predict(X_val)
+    y_bl_pred = model.predict(X_bl_raw)
 
 # 还原尺度
 if enable_log_target:
     y_tr_true, y_tr_hat = 10**y_train, 10**y_tr_pred
     y_va_true, y_va_hat = 10**y_val, 10**y_va_pred
-    y_te_true, y_te_hat = 10**y_test, 10**y_te_pred
-    y_al_true, y_al_hat = 10**y_raw, 10**y_al_pred
+    y_bl_hat = 10**y_bl_pred
+    if blind_has_ground_truth:
+        y_bl_true = df_bl_clean[target_col].to_numpy(dtype=np.float64)
 else:
     y_tr_true, y_tr_hat = y_train, y_tr_pred
     y_va_true, y_va_hat = y_val, y_va_pred
-    y_te_true, y_te_hat = y_test, y_te_pred
-    y_al_true, y_al_hat = y_raw, y_al_pred
+    y_bl_hat = y_bl_pred
+    if blind_has_ground_truth:
+        y_bl_true = df_bl_clean[target_col].to_numpy(dtype=np.float64)
 
-# 6. UI 展示
-st.title("🛢️ 储层物性机器学习预测与增强平台")
-st.markdown(f"当前模型：**{selected_model_name}** ｜ 预测目标：**{target_col}**")
+# -------------------------------------------------------------
+# 7. 主界面数据呈现与指标
+# -------------------------------------------------------------
+st.title("🛢️ 储层物性机器学习盲井跨井验证工作台")
+st.caption(f"当前算法：**{selected_model_name}** ｜ 预测目标：**{target_col}**")
 
 c1, c2, c3, c4 = st.columns(4)
-c1.metric("总样点数", len(df_clean))
-c2.metric("训练集原样点", len(X_train_orig))
-c3.metric("增强后训练规模", len(X_train), delta=f"+{np.sum(is_synth)}")
-c4.metric("独立盲测集", len(y_test))
+c1.metric("训练集原样本数", len(X_train_orig))
+c2.metric("训练集增强后规模", len(X_train), delta=f"+{np.sum(is_synth)} 合成样本")
+c3.metric("训练集内部验证样本", len(X_val))
+c4.metric("独立盲井层段点数", len(df_bl_clean))
 
-# 导出功能
-with st.expander("💾 保存增强后的数据集 (TXT/CSV)", expanded=False):
-    df_aug = pd.DataFrame(X_train, columns=feature_cols)
-    df_aug[target_col] = y_tr_true
-    df_aug['样本类型'] = np.where(is_synth, '增强合成点', '原始点')
-    txt_io = io.StringIO()
-    df_aug.to_csv(txt_io, sep='\t', index=False)
-    st.download_button("📥 下载增强训练集 (TXT)", txt_io.getvalue().encode('utf-8-sig'), file_name="augmented_data.txt")
+# 导出盲井预测成果
+with st.expander("💾 导出独立盲井连续预测成果表 (TXT/CSV)", expanded=False):
+    df_blind_export = df_bl_clean.copy()
+    df_blind_export[f'{target_col}_模型预测值'] = np.round(y_bl_hat, 4)
+    
+    col_e1, col_e2 = st.columns(2)
+    with col_e1:
+        txt_out = io.StringIO()
+        df_blind_export.to_csv(txt_out, sep='\t', index=False)
+        st.download_button("📥 下载盲井解释成果 (Tab分隔 TXT)", txt_out.getvalue().encode('utf-8-sig'), file_name=f"blind_well_{target_col}_result.txt")
+    with col_e2:
+        csv_out = io.StringIO()
+        df_blind_export.to_csv(csv_out, index=False)
+        st.download_button("📥 下载盲井解释成果 (CSV 格式)", csv_out.getvalue().encode('utf-8-sig'), file_name=f"blind_well_{target_col}_result.csv")
 
-# 指标
 def calc_metrics(yt, yp):
     return r2_score(yt, yp), np.sqrt(mean_squared_error(yt, yp)), mean_absolute_error(yt, yp)
 
 r2_tr, rmse_tr, mae_tr = calc_metrics(y_tr_true, y_tr_hat)
 r2_va, rmse_va, mae_va = calc_metrics(y_va_true, y_va_hat)
-r2_te, rmse_te, mae_te = calc_metrics(y_te_true, y_te_hat)
 
-st.markdown("### 📈 精度指标评估")
-m1, m2, m3 = st.columns(3)
-m1.metric("训练集 R²", f"{r2_tr:.3f}", delta=f"RMSE: {rmse_tr:.3f}")
-m2.metric("验证集 R²", f"{r2_va:.3f}", delta=f"RMSE: {rmse_va:.3f}")
-m3.metric("独立测试集 R² (真实泛化)", f"{r2_te:.3f}", delta=f"RMSE: {rmse_te:.3f}")
+st.markdown("### 📈 模型评估看板")
+if blind_has_ground_truth:
+    r2_bl, rmse_bl, mae_bl = calc_metrics(y_bl_true, y_bl_hat)
+    m1, m2, m3 = st.columns(3)
+    m1.metric("训练集拟合度 R²", f"{r2_tr:.3f}", delta=f"RMSE: {rmse_tr:.3f}")
+    m1.caption(f"样本数: {len(y_train)} | MAE: {mae_tr:.3f}")
+    m2.metric("内部验证集 R²", f"{r2_va:.3f}", delta=f"RMSE: {rmse_va:.3f}")
+    m2.caption(f"样本数: {len(y_val)} | MAE: {mae_va:.3f}")
+    m3.metric("🎯 独立盲井真实跨井 R²", f"{r2_bl:.3f}", delta=f"RMSE: {rmse_bl:.3f}")
+    m3.caption(f"盲井实测点: {len(y_bl_true)} | MAE: {mae_bl:.3f}")
+else:
+    m1, m2 = st.columns(2)
+    m1.metric("训练集拟合度 R²", f"{r2_tr:.3f}", delta=f"RMSE: {rmse_tr:.3f}")
+    m2.metric("内部验证集 R²", f"{r2_va:.3f}", delta=f"RMSE: {rmse_va:.3f}")
+    st.info("提示：上传的盲井数据未检测到实测标签，已进入连续物性全井段预测推演模式。")
 
-# 图件展示
+# -------------------------------------------------------------
+# 8. 成果图件呈现
+# -------------------------------------------------------------
 st.markdown("---")
-tab1, tab2 = st.tabs(["散点交叉对比与残差图", "连续测井预测大样图"])
+tab1, tab2 = st.tabs(["1. 散点交叉拟合与残差检验", "2. 独立盲井测井道综合解释大样图"])
 
 with tab1:
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
-    axes[0].scatter(y_tr_true, y_tr_hat, alpha=0.4, label=f'Train (R²={r2_tr:.2f})')
-    axes[0].scatter(y_va_true, y_va_hat, alpha=0.7, label=f'Val (R²={r2_va:.2f})')
-    axes[0].scatter(y_te_true, y_te_hat, marker='^', alpha=0.9, label=f'Test (R²={r2_te:.2f})')
-    mv_min, mv_max = min(np.min(y_al_true), np.min(y_al_hat)), max(np.max(y_al_true), np.max(y_al_hat))
-    axes[0].plot([mv_min, mv_max], [mv_min, mv_max], 'k--', lw=1.5)
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+    
+    # 交叉散点图
+    axes[0].scatter(y_tr_true, y_tr_hat, color='#1f77b4', alpha=0.4, s=25, label=f'Train (R²={r2_tr:.2f})')
+    axes[0].scatter(y_va_true, y_va_hat, color='#ff7f0e', alpha=0.7, s=35, label=f'Val (R²={r2_va:.2f})')
+    if blind_has_ground_truth:
+        axes[0].scatter(y_bl_true, y_bl_hat, color='#d62728', marker='^', alpha=0.9, s=45, label=f'Blind Well (R²={r2_bl:.2f})')
+        min_v = min(np.min(y_tr_true), np.min(y_bl_true), np.min(y_bl_hat))
+        max_v = max(np.max(y_tr_true), np.max(y_bl_true), np.max(y_bl_hat))
+    else:
+        min_v = min(np.min(y_tr_true), np.min(y_tr_hat))
+        max_v = max(np.max(y_tr_true), np.max(y_tr_hat))
+    
+    axes[0].plot([min_v, max_v], [min_v, max_v], 'k--', lw=1.5, label='1:1 Line')
     if enable_log_target:
         axes[0].set_xscale('log')
         axes[0].set_yscale('log')
     axes[0].set_xlabel(f"Measured: {target_col}")
     axes[0].set_ylabel(f"Predicted: {target_col}")
+    axes[0].set_title(f"Crossplot: Measured vs Predicted", fontsize=12)
     axes[0].legend()
     
-    sns.kdeplot(y_tr_true - y_tr_hat, ax=axes[1], fill=True, label='Train Residuals')
-    sns.kdeplot(y_te_true - y_te_hat, ax=axes[1], fill=True, label='Test Residuals')
+    # 残差分布
+    sns.kdeplot(y_tr_true - y_tr_hat, ax=axes[1], fill=True, color='#1f77b4', label='Train Residuals')
+    if blind_has_ground_truth:
+        sns.kdeplot(y_bl_true - y_bl_hat, ax=axes[1], fill=True, color='#d62728', label='Blind Well Residuals')
     axes[1].axvline(0, color='gray', linestyle='--')
+    axes[1].set_xlabel("Residuals (Measured - Predicted)")
+    axes[1].set_title("Residuals Probability Density", fontsize=12)
     axes[1].legend()
+    
     st.pyplot(fig)
     plt.close()
 
 with tab2:
-    tracks = min(3, len(feature_cols)) + 2
-    fig, axes = plt.subplots(1, tracks, figsize=(3.5 * tracks, 7), sharey=True)
-    for i in range(tracks - 2):
-        axes[i].plot(df_clean[feature_cols[i]], depth_vals, lw=1.2)
-        axes[i].set_xlabel(feature_cols[i])
+    # 盲井综合剖面道
+    tracks = min(3, len(feature_cols)) + (2 if blind_has_ground_truth else 1)
+    fig, axes = plt.subplots(1, tracks, figsize=(3.5 * tracks, 8), sharey=True)
+    
+    # 特征曲线道
+    for i in range(min(3, len(feature_cols))):
+        col_name = feature_cols[i]
+        axes[i].plot(df_bl_clean[col_name], depth_bl, color=sns.color_palette("tab10")[i], lw=1.2)
+        axes[i].set_xlabel(col_name)
         axes[i].grid(True, linestyle=':')
     
-    axes[tracks - 2].scatter(y_al_true, depth_vals, color='black', s=8, alpha=0.5, label='Measured')
-    axes[tracks - 2].plot(y_al_hat, depth_vals, color='red', lw=1.5, label='Predicted')
-    axes[tracks - 2].set_xlabel(target_col)
+    # 盲井预测物性道
+    pred_track = axes[min(3, len(feature_cols))]
+    if blind_has_ground_truth:
+        pred_track.scatter(y_bl_true, depth_bl, color='black', s=10, alpha=0.6, label='Lab Core')
+    pred_track.plot(y_bl_hat, depth_bl, color='red', lw=1.5, label='ML Predicted')
+    pred_track.set_xlabel(f"Predicted {target_col}")
     if enable_log_target:
-        axes[tracks - 2].set_xscale('log')
-    axes[tracks - 2].legend(loc='upper right')
+        pred_track.set_xscale('log')
+    pred_track.legend(loc='upper right')
+    pred_track.grid(True, linestyle=':')
     
-    diff = np.abs(y_al_true - y_al_hat)
-    axes[tracks - 1].fill_betweenx(depth_vals, 0, diff, color='orange', alpha=0.5)
-    axes[tracks - 1].set_xlabel("Abs Error")
-    
+    # 误差道（若有实测标签）
+    if blind_has_ground_truth:
+        err_track = axes[tracks - 1]
+        err_val = np.abs(y_bl_true - y_bl_hat)
+        err_track.fill_betweenx(depth_bl, 0, err_val, color='orange', alpha=0.5)
+        err_track.plot(err_val, depth_bl, color='darkorange', lw=1)
+        err_track.set_xlabel("Abs Error")
+        err_track.grid(True, linestyle=':')
+
     axes[0].invert_yaxis()
-    axes[0].set_ylabel(f"Depth ({depth_col})")
+    axes[0].set_ylabel(f"Depth ({depth_col})", fontsize=12)
+    fig.suptitle(f"Blind Well Continuous Reservoir Property Prediction Profile [{target_col}]", fontsize=13, y=0.98)
+    
     st.pyplot(fig)
     plt.close()
